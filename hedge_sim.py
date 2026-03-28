@@ -264,9 +264,9 @@ def restaurar_estado():
 
 # ── Lógica de trading (AI-EDGE exacta) ───────────────────────────────────────
 
-def comprar(lado: str, ask: float) -> tuple:
-    """Compra simulada al best_ask. Retorna (precio, shares, usd) o (0,0,0).
-    Demora 1s para simular latencia de orden real en producción."""
+def comprar(lado: str, ask_envio: float, token_id: str) -> tuple:
+    """Compra simulada. Retorna (precio_fill, shares, usd) o (0,0,0).
+    Espera 1s (latencia real) y re-fetchea el ask al momento del fill."""
     usd = round(ENTRY_USD, 4)
     if usd < MIN_USD_ORDEN:
         log_ev(f"  ✗ Orden muy pequeña: ${usd:.2f}")
@@ -274,17 +274,30 @@ def comprar(lado: str, ask: float) -> tuple:
     if usd > estado["capital"]:
         log_ev(f"  ✗ Capital insuficiente: ${estado['capital']:.2f}")
         return 0.0, 0.0, 0.0
-    log_ev(f"  → Enviando orden {lado} @ {ask:.4f} | ${usd:.2f}...")
+
+    log_ev(f"  → Enviando orden {lado} @ {ask_envio:.4f} | ${usd:.2f}...")
     time.sleep(1.0)  # simula latencia de fill en producción
+
+    # Re-fetchear precio real al momento del fill (igual que en producción)
+    ob_fill, err = get_order_book_metrics(token_id)
+    if ob_fill and ob_fill["best_ask"] > 0:
+        ask_fill = ob_fill["best_ask"]
+    else:
+        ask_fill = ask_envio  # fallback si falla el fetch
+
+    slippage = ask_fill - ask_envio
+    if slippage != 0:
+        log_ev(f"  ↕ Slippage: {slippage*100:+.2f}c ({ask_envio:.4f} → {ask_fill:.4f})")
+
     # Comisión taker 0.1% — reduce shares recibidas (igual que fee_rate_bps=1000 en CLOB)
-    shares = round((usd / ask) * (1 - TAKER_FEE), 4)
+    shares  = round((usd / ask_fill) * (1 - TAKER_FEE), 4)
     fee_usd = round(usd * TAKER_FEE, 6)
     estado["capital"] -= usd
-    log_ev(f"  ✓ COMPRA {lado} @ {ask:.4f} | {shares:.4f}sh | ${usd:.2f} (fee ${fee_usd:.4f})")
-    return ask, shares, usd
+    log_ev(f"  ✓ FILL {lado} @ {ask_fill:.4f} | {shares:.4f}sh | ${usd:.2f} (fee ${fee_usd:.4f})")
+    return ask_fill, shares, usd
 
 
-def intentar_entrada(up_m, dn_m, secs):
+def intentar_entrada(up_m, dn_m, secs, mkt):
     if pos["activa"] or secs is None:
         return
 
@@ -298,13 +311,15 @@ def intentar_entrada(up_m, dn_m, secs):
     obi_dn = dn_m["obi"]
 
     if obi_up > obi_dn and obi_up >= OBI_THRESHOLD:
-        lado = "UP"
-        ask  = up_m["best_ask"]
-        obi  = obi_up
+        lado     = "UP"
+        ask      = up_m["best_ask"]
+        obi      = obi_up
+        token_id = mkt["up_token_id"]
     elif obi_dn > obi_up and obi_dn >= OBI_THRESHOLD:
-        lado = "DOWN"
-        ask  = dn_m["best_ask"]
-        obi  = obi_dn
+        lado     = "DOWN"
+        ask      = dn_m["best_ask"]
+        obi      = obi_dn
+        token_id = mkt["down_token_id"]
     else:
         return
 
@@ -321,7 +336,7 @@ def intentar_entrada(up_m, dn_m, secs):
         f"{int(secs)}s | banda≤{banda_entrada_max(secs):.3f}"
     )
 
-    precio, shares, usd = comprar(lado, ask)
+    precio, shares, usd = comprar(lado, ask, token_id)
     if usd == 0.0:
         return
 
@@ -343,7 +358,7 @@ def intentar_entrada(up_m, dn_m, secs):
     guardar_estado()
 
 
-def intentar_hedge(up_m, dn_m, secs):
+def intentar_hedge(up_m, dn_m, secs, mkt):
     if not pos["activa"] or pos["hedgeado"] or secs is None:
         return
 
@@ -359,14 +374,15 @@ def intentar_hedge(up_m, dn_m, secs):
     if obi_lado2 < HEDGE_OBI_MIN:
         return
 
-    ask_lado2 = dn_m["best_ask"] if lado2 == "DOWN" else up_m["best_ask"]
+    ask_lado2  = dn_m["best_ask"] if lado2 == "DOWN" else up_m["best_ask"]
+    token_id_2 = mkt["down_token_id"] if lado2 == "DOWN" else mkt["up_token_id"]
 
     ok, razon = puede_hedgear(ask_lado2, secs)
     if not ok:
         log_ev(f"  SKIP hedge {lado2} @ {ask_lado2:.3f}: {razon}")
         return
 
-    if estado["capital"] * MAX_PCT_POR_LADO < MIN_USD_ORDEN:
+    if ENTRY_USD < MIN_USD_ORDEN:
         return
 
     log_ev(
@@ -374,7 +390,7 @@ def intentar_hedge(up_m, dn_m, secs):
         f"(banda≤{banda_hedge_max(secs):.3f} | {int(secs)}s)"
     )
 
-    precio, shares, usd = comprar(lado2, ask_lado2)
+    precio, shares, usd = comprar(lado2, ask_lado2, token_id_2)
     if usd == 0.0:
         return
 
@@ -601,10 +617,10 @@ def _main_loop():
                 intentar_early_exit(up_m, dn_m, secs)
 
             if pos["activa"] and not pos["hedgeado"]:
-                intentar_hedge(up_m, dn_m, secs)
+                intentar_hedge(up_m, dn_m, secs, mkt)
 
             if not pos["activa"]:
-                intentar_entrada(up_m, dn_m, secs)
+                intentar_entrada(up_m, dn_m, secs, mkt)
 
             guardar_estado()
 
