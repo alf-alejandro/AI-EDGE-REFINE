@@ -24,6 +24,7 @@ from datetime import datetime
 from collections import deque
 
 import strategy_core_prod as core
+from ws_client import MarketDataWS
 
 logging.basicConfig(
     level=logging.INFO,
@@ -575,7 +576,8 @@ def _main_loop():
 
     guardar_estado()
 
-    mkt = None
+    mkt    = None
+    mkt_ws = MarketDataWS()   # WebSocket de order book en tiempo real
 
     while not _stop_evt.is_set():
         # Esperar si está pausado
@@ -591,22 +593,31 @@ def _main_loop():
                 obi_history_up.clear()
                 obi_history_dn.clear()
                 estado["trades_este_ciclo"] = 0
+                mkt_ws.unsubscribe()
                 mkt = core.find_active_market(SYMBOL)
                 if mkt:
                     estado["ciclos"] += 1
                     log_ev(f"Mercado: {mkt.get('question', '')} | ciclo #{estado['ciclos']}")
+                    # Suscribir WebSocket al nuevo mercado
+                    mkt_ws.subscribe([mkt["up_token_id"], mkt["down_token_id"]])
+                    log_ev("MarketWS suscrito — order book en tiempo real")
                 else:
                     log_ev("Sin mercado activo — reintentando en 10s...")
                     time.sleep(10)
                     continue
 
-            up_m, err_up = core.get_order_book_metrics(mkt["up_token_id"])
-            dn_m, err_dn = core.get_order_book_metrics(mkt["down_token_id"])
+            # ── Obtener order book: WebSocket primero, fallback REST ──────────
+            up_m = mkt_ws.get_metrics(mkt["up_token_id"])
+            dn_m = mkt_ws.get_metrics(mkt["down_token_id"])
 
             if not up_m or not dn_m:
-                log_ev(f"Error OB: {err_up or err_dn}")
-                time.sleep(POLL_INTERVAL * 2)
-                continue
+                # Todavía no llegó el snapshot WS — usar REST
+                up_m, err_up = core.get_order_book_metrics(mkt["up_token_id"])
+                dn_m, err_dn = core.get_order_book_metrics(mkt["down_token_id"])
+                if not up_m or not dn_m:
+                    log_ev(f"Error OB: {err_up or err_dn}")
+                    time.sleep(POLL_INTERVAL * 2)
+                    continue
 
             secs = core.seconds_remaining(mkt)
 
@@ -618,6 +629,7 @@ def _main_loop():
                 if pos["activa"]:
                     verificar_resolucion(up_m, dn_m, secs)
                 log_ev("Mercado expirado — buscando siguiente ciclo...")
+                mkt_ws.unsubscribe()
                 mkt = None
                 time.sleep(5)
                 continue

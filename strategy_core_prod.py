@@ -18,7 +18,12 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, OrderType, MarketOrderArgs
 from py_clob_client.constants import AMOY
 
+from ws_client import FillWatcher
+
 log = logging.getLogger("strategy_core_prod")
+
+# Credenciales API guardadas para WebSocket (se llenan al autenticar)
+_api_creds = {"key": "", "secret": "", "passphrase": ""}
 
 CLOB_HOST  = "https://clob.polymarket.com"
 GAMMA_API  = "https://gamma-api.polymarket.com"
@@ -51,7 +56,12 @@ def get_authenticated_clob_client() -> ClobClient:
             signature_type=0,
             funder=PROXY_ADDRESS or None,
         )
-        _auth_client.set_api_creds(_auth_client.create_or_derive_api_creds())
+        creds = _auth_client.create_or_derive_api_creds()
+        _auth_client.set_api_creds(creds)
+        # Guardar credenciales para WebSocket FillWatcher
+        _api_creds["key"]        = creds.api_key
+        _api_creds["secret"]     = creds.api_secret
+        _api_creds["passphrase"] = creds.api_passphrase
         log.info("Cliente CLOB autenticado OK")
     return _auth_client
 
@@ -146,21 +156,40 @@ def place_taker_buy(token_id: str, usd_amount: float, max_price: float = 0.99) -
 
         log.info(f"Orden buy enviada: {order_id} | ask={best_ask:.4f} | ${usd_amount:.2f}")
 
-        # Sondear fill por 3 segundos (0.25s × 12 — límite POST: 60 req/s)
+        # ── WebSocket fill detection (<100ms) con fallback a polling ──────────
+        ws_result = None
+        if _api_creds["key"]:
+            try:
+                watcher   = FillWatcher(_api_creds["key"], _api_creds["secret"],
+                                        _api_creds["passphrase"], order_id, timeout=3.0)
+                ws_result = watcher.wait()
+            except Exception as e:
+                log.debug(f"FillWatcher error (usando polling): {e}")
+
+        if ws_result and ws_result["filled"]:
+            avg_price = ws_result["avg_price"] or best_ask
+            filled_sh = ws_result["size_matched"] or shares
+            result["filled"] = True
+            result["price"]  = avg_price
+            result["shares"] = filled_sh
+            result["usd"]    = round(filled_sh * avg_price, 4)
+            log.info(f"Buy FILLED (WS): {filled_sh:.4f}sh @ {avg_price:.4f} = ${result['usd']:.2f}")
+            return result
+
+        # Fallback: polling REST si WebSocket no detectó el fill
         for _ in range(12):
             time.sleep(0.25)
             try:
-                order = client.get_order(order_id)
-                status = (order.get("status") or "").lower()
+                order        = client.get_order(order_id)
+                status       = (order.get("status") or "").lower()
                 size_matched = float(order.get("size_matched") or 0)
                 avg_price    = float(order.get("avg_price") or best_ask)
-
                 if status in ("matched", "filled") or size_matched > 0:
                     result["filled"] = True
                     result["price"]  = avg_price
                     result["shares"] = size_matched if size_matched > 0 else shares
                     result["usd"]    = round(result["shares"] * avg_price, 4)
-                    log.info(f"Buy FILLED: {result['shares']:.4f}sh @ {avg_price:.4f} = ${result['usd']:.2f}")
+                    log.info(f"Buy FILLED (poll): {result['shares']:.4f}sh @ {avg_price:.4f} = ${result['usd']:.2f}")
                     return result
             except Exception:
                 pass
@@ -215,7 +244,26 @@ def place_taker_sell(token_id: str, shares: float, min_price: float = 0.01) -> d
 
             log.info(f"Sell attempt {attempt+1}: {order_id} | bid={bid_price:.4f} | {shares:.4f}sh")
 
-            # Sondear fill por 4 segundos (0.25s × 16)
+            # ── WebSocket fill detection con fallback a polling ───────────────
+            ws_result = None
+            if _api_creds["key"]:
+                try:
+                    watcher   = FillWatcher(_api_creds["key"], _api_creds["secret"],
+                                            _api_creds["passphrase"], order_id, timeout=4.0)
+                    ws_result = watcher.wait()
+                except Exception as e:
+                    log.debug(f"FillWatcher sell error: {e}")
+
+            if ws_result and ws_result["filled"]:
+                avg_price = ws_result["avg_price"] or bid_price
+                filled_sh = ws_result["size_matched"] or shares
+                result["filled"] = True
+                result["price"]  = avg_price
+                result["usd"]    = round(filled_sh * avg_price, 4)
+                log.info(f"Sell FILLED (WS): {filled_sh:.4f}sh @ {avg_price:.4f} = ${result['usd']:.2f}")
+                return result
+
+            # Fallback polling
             for _ in range(16):
                 time.sleep(0.25)
                 try:
