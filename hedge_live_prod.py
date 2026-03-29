@@ -43,7 +43,7 @@ SYMBOL          = os.environ.get("SYMBOL", "BTC").upper()
 
 # Parámetros AI-EDGE (exactos — no cambiar sin validar con datos)
 MIN_USD_ORDEN     = 1.00
-POLL_INTERVAL     = 1.0
+POLL_INTERVAL     = 0.2         # límite API: 150 req/s, usamos ~10 req/s
 
 OBI_THRESHOLD     = 0.10
 OBI_WINDOW_SIZE   = 8

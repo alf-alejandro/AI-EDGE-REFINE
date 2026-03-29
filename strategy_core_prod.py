@@ -146,9 +146,9 @@ def place_taker_buy(token_id: str, usd_amount: float, max_price: float = 0.99) -
 
         log.info(f"Orden buy enviada: {order_id} | ask={best_ask:.4f} | ${usd_amount:.2f}")
 
-        # Sondear fill por 4 segundos
-        for _ in range(8):
-            time.sleep(0.5)
+        # Sondear fill por 3 segundos (0.25s × 12 — límite POST: 60 req/s)
+        for _ in range(12):
+            time.sleep(0.25)
             try:
                 order = client.get_order(order_id)
                 status = (order.get("status") or "").lower()
@@ -215,9 +215,9 @@ def place_taker_sell(token_id: str, shares: float, min_price: float = 0.01) -> d
 
             log.info(f"Sell attempt {attempt+1}: {order_id} | bid={bid_price:.4f} | {shares:.4f}sh")
 
-            # Sondear fill por 5 segundos
-            for _ in range(10):
-                time.sleep(0.5)
+            # Sondear fill por 4 segundos (0.25s × 16)
+            for _ in range(16):
+                time.sleep(0.25)
                 try:
                     order = client.get_order(order_id)
                     status = (order.get("status") or "").lower()

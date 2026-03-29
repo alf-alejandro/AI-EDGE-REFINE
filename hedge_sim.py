@@ -52,7 +52,7 @@ TAKER_FEE         = 0.001       # 0.1% por orden (buy y sell)
 # Parámetros de estrategia AI-EDGE (exactos)
 ENTRY_USD         = float(os.environ.get("ENTRY_USD", "3.0"))  # $3 fijo por lado
 MIN_USD_ORDEN     = 1.00
-POLL_INTERVAL     = 0.5         # segundos entre ciclos
+POLL_INTERVAL     = 0.2         # segundos entre ciclos (límite API: 150 req/s, usamos ~10)
 
 OBI_THRESHOLD     = 0.10
 OBI_WINDOW_SIZE   = 8
